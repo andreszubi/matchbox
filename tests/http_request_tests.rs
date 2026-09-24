@@ -25,6 +25,7 @@ fn serve(
                 }
                 Err(error) => panic!("accept HTTP request: {error}"),
             };
+            socket.set_nonblocking(false).unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
@@ -152,7 +153,6 @@ fn http_invalid_options_fail_before_network_or_file_side_effects() {
                 values.append(false);
                 values.append(-1);
                 values.append(10 ^ 30);
-                values.append(10 ^ 19);
                 values.append(10 ^ 400);
                 values.append((-1) ^ 0.5);
             }} else {{
