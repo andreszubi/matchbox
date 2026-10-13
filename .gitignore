@@ -26,3 +26,6 @@ docs/examples/boxlang_alpine_js/panic_debug.txt
 .codex
 panic_debug.txt
 reference/
+stubs/
+stubs_build/
+stubs.rs
