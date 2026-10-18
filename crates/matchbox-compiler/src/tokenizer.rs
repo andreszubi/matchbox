@@ -287,6 +287,14 @@ pub fn lex_template(source: &str) -> LexedSource<'_> {
     lexer.lex()
 }
 
+/// Lex CFScript (.cfc / .cfs). Same as `lex`, but with CF mode on, so
+/// CF-only keywords such as `component` are recognized.
+pub fn lex_cf_script(source: &str) -> LexedSource<'_> {
+    let mut lexer = Lexer::new(source, LexerMode::DefaultScript);
+    lexer.cf_mode = true;
+    lexer.lex()
+}
+
 pub fn tokenize(source: &str) -> Vec<Token> {
     lex(source).into_owned_tokens()
 }
@@ -311,6 +319,8 @@ struct Lexer<'a> {
     tokens: Vec<SyntaxToken>,
     trivia: Vec<Trivia>,
     mode_stack: Vec<LexerMode>,
+    /// True when lexing ColdFusion (CFScript). Enables CF-only keywords.
+    cf_mode: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -323,6 +333,7 @@ impl<'a> Lexer<'a> {
             tokens: Vec::new(),
             trivia: Vec::new(),
             mode_stack: vec![initial_mode],
+            cf_mode: false,
         }
     }
 
@@ -780,7 +791,15 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        let kind = keyword_or_ident(lexeme);
+        let kind = match keyword_or_ident(lexeme) {
+            // In CF files, `component` means the same as BoxLang's `class`.
+            // Only CF files get this, so BoxLang code can still use
+            // `component` as an ordinary variable name.
+            TokenKind::Identifier if self.cf_mode && lexeme.eq_ignore_ascii_case("component") => {
+                TokenKind::Class
+            }
+            other => other,
+        };
         self.push_token(kind, start, end, start_line, start_col);
     }
 
@@ -1268,6 +1287,18 @@ mod tests {
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].kind, TokenKind::Identifier);
         assert_eq!(tokens[0].lexeme, "functionfoo");
+    }
+
+    #[test]
+    fn cf_mode_maps_component_to_class() {
+        // CF mode: `component` (any case) is the class keyword.
+        for src in ["component", "Component", "COMPONENT"] {
+            let tokens = lex_cf_script(src).into_owned_tokens();
+            assert_eq!(tokens[0].kind, TokenKind::Class, "CF source: {src}");
+        }
+        // BoxLang mode: `component` stays an ordinary name.
+        let tokens = tokenize("component");
+        assert_eq!(tokens[0].kind, TokenKind::Identifier);
     }
 
     #[test]
