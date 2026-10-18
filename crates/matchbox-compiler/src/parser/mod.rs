@@ -101,6 +101,25 @@ pub fn parse(source: &str, filename: Option<&str>) -> Result<Vec<Statement>> {
     }
 }
 
+/// Parse CFScript (.cfc / .cfs). Identical to `parse`, except the source is
+/// lexed in CF mode (`lex_cf_script`), so `component` reads as `class`.
+pub fn parse_cf_script(source: &str, filename: Option<&str>) -> Result<Vec<Statement>> {
+    let lexed = lex_cf_script(source);
+    match Parser::new(source, lexed.tokens(), filename).parse_program() {
+        Ok(stmts) => Ok(stmts),
+        Err(err) => {
+            if let Some(parse_err) = err.downcast_ref::<ParseError>() {
+                if parse_err.source.is_none() {
+                    let mut enriched = parse_err.clone();
+                    enriched.source = Some(source.to_string());
+                    return Err(enriched.into());
+                }
+            }
+            Err(err)
+        }
+    }
+}
+
 /// Parse `source` as if it began at `line_offset` blank lines. Used by the
 /// template parser so that script-island parse errors report line numbers
 /// relative to the template rather than relative to the island's content.
@@ -270,6 +289,11 @@ impl<'a> Parser<'a> {
         let current = self.peek_kind()?;
         let current_text = self.token_text_lower(0)?;
         match current {
+            // `a MOD b` is the word form of `a % b`. `mod` is not a reserved
+            // word, so it is only an operator here, between two operands, and
+            // it still works as an ordinary variable name elsewhere.
+            // Same precedence (11) as `%`, and the same "%" operator string.
+            TokenKind::Identifier if current_text == "mod" => Some((11, "%".to_string(), 1)),
             TokenKind::Not => {
                 if matches!(self.kind(1), Some(TokenKind::Contains)) {
                     Some((3, "not contains".to_string(), 2))
@@ -1369,7 +1393,8 @@ impl<'a> Parser<'a> {
     fn parse_unary(&mut self) -> Result<Expression> {
         let line = self.peek_line();
         match self.peek_kind() {
-            Some(TokenKind::Bang) => {
+            // `NOT x` is the word form of `!x` and builds the same node.
+            Some(TokenKind::Bang) | Some(TokenKind::Not) => {
                 self.pos += 1;
                 let expr = self.parse_unary()?;
                 Ok(Expression::new(ExpressionKind::UnaryNot(Box::new(expr)), line))
@@ -2195,5 +2220,52 @@ mod tests {
             parse_string_content(&source),
             vec![StringPart::Text("he\"llo".to_string())]
         );
+    }
+
+    // ---- CF parsing (issue #45): "same tree" tests ----
+
+    #[test]
+    fn cf_component_parses_like_bx_class() {
+        let cases = [
+            ("component { function hi() { return 1; } }", "class { function hi() { return 1; } }"),
+            ("COMPONENT { }", "class { }"),
+            ("component extends=\"Base\" { }", "class extends=\"Base\" { }"),
+        ];
+        for (cf, bx) in cases {
+            let cf_ast = parse_cf_script(cf, None).unwrap();
+            let bx_ast = parse(bx, None).unwrap();
+            assert_eq!(cf_ast, bx_ast, "CF source: {cf}");
+        }
+    }
+
+    #[test]
+    fn component_is_still_a_variable_name_in_boxlang() {
+        let ast = parse("component = 1;", None).unwrap();
+        assert!(matches!(ast[0].kind, StatementKind::Expression(_)));
+    }
+
+    #[test]
+    fn not_and_mod_operators() {
+        let cases = [
+            ("x = NOT a;", "x = !a;"),
+            ("x = not a;", "x = !a;"),
+            ("x = NOT a && b;", "x = !a && b;"),
+            ("x = 10 MOD 3;", "x = 10 % 3;"),
+            ("x = 10 mod 3;", "x = 10 % 3;"),
+            ("x = 1 + 10 MOD 3;", "x = 1 + 10 % 3;"),
+            ("x = 10 MOD 4 MOD 3;", "x = 10 % 4 % 3;"),
+        ];
+        for (words, symbols) in cases {
+            let a = parse(words, None).unwrap();
+            let b = parse(symbols, None).unwrap();
+            assert_eq!(a, b, "source: {words}");
+        }
+    }
+
+    #[test]
+    fn mod_is_still_a_variable_name() {
+        let a = parse("mod = 5; y = mod MOD 2;", None).unwrap();
+        let b = parse("mod = 5; y = mod % 2;", None).unwrap();
+        assert_eq!(a, b);
     }
 }
