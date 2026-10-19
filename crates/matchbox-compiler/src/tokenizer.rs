@@ -283,7 +283,14 @@ pub fn lex(source: &str) -> LexedSource<'_> {
 }
 
 pub fn lex_template(source: &str) -> LexedSource<'_> {
+    lex_template_with_prefix(source, "bx:")
+}
+
+/// Lex a template whose components use `tag_prefix`: `"bx:"` for BoxLang
+/// (`<bx:set>`), `"cf"` for CFML (`<cfset>`). The prefix matches in any case.
+pub fn lex_template_with_prefix<'a>(source: &'a str, tag_prefix: &'static str) -> LexedSource<'a> {
     let mut lexer = Lexer::new(source, LexerMode::DefaultTemplate);
+    lexer.tag_prefix = tag_prefix;
     lexer.lex()
 }
 
@@ -321,6 +328,8 @@ struct Lexer<'a> {
     mode_stack: Vec<LexerMode>,
     /// True when lexing ColdFusion (CFScript). Enables CF-only keywords.
     cf_mode: bool,
+    /// Tag prefix for template components: "bx:" for BoxLang, "cf" for CFML.
+    tag_prefix: &'static str,
 }
 
 impl<'a> Lexer<'a> {
@@ -334,7 +343,30 @@ impl<'a> Lexer<'a> {
             trivia: Vec::new(),
             mode_stack: vec![initial_mode],
             cf_mode: false,
+            tag_prefix: "bx:",
         }
+    }
+
+    /// True if the source at the cursor starts with `pattern`, ignoring ASCII case.
+    fn at_ci(&self, pattern: &str) -> bool {
+        self.source.as_bytes()[self.pos..]
+            .get(..pattern.len())
+            .is_some_and(|bytes| bytes.eq_ignore_ascii_case(pattern.as_bytes()))
+    }
+
+    /// At `<prefix>name` (the cursor is just past the `<`).
+    fn at_open_tag(&self, name: &str) -> bool {
+        self.at_ci(&format!("{}{}", self.tag_prefix, name))
+    }
+
+    /// At `</prefix>name>`.
+    fn at_close_tag(&self, name: &str) -> bool {
+        self.at_ci(&format!("</{}{}>", self.tag_prefix, name))
+    }
+
+    /// Length of `</prefix>name>`.
+    fn close_tag_len(&self, name: &str) -> usize {
+        3 + self.tag_prefix.len() + name.len()
     }
 
     fn current_mode(&self) -> LexerMode {
@@ -362,11 +394,12 @@ impl<'a> Lexer<'a> {
                 LexerMode::DefaultScript => {
                     // Check for </bx:script> while in template script mode
                     if self.mode_stack_contains(LexerMode::TemplateScript) {
-                        if self.source[self.pos..].starts_with("</bx:script>") {
+                        if self.at_close_tag("script") {
                             let start = self.pos;
                             let start_line = self.line;
                             let start_col = self.col;
-                            self.pos += 12; self.col += 12;
+                            let n = self.close_tag_len("script");
+                            self.pos += n; self.col += n as u32;
                             self.push_token(TokenKind::ScriptEnd, start, self.pos, start_line, start_col);
                             self.pop_mode(); // DefaultScript
                             self.pop_mode(); // TemplateScript
@@ -382,13 +415,14 @@ impl<'a> Lexer<'a> {
                     self.skip_whitespace_and_comments();
                     if self.mode_stack_contains(LexerMode::TemplateScript)
                         && self.pos < self.source.len()
-                        && self.source[self.pos..].starts_with("</bx:script>")
+                        && self.at_close_tag("script")
                     {
                         let start = self.pos;
                         let start_line = self.line;
                         let start_col = self.col;
-                        self.pos += 12;
-                        self.col += 12;
+                        let n = self.close_tag_len("script");
+                        self.pos += n;
+                        self.col += n as u32;
                         self.push_token(TokenKind::ScriptEnd, start, self.pos, start_line, start_col);
                         self.pop_mode(); // DefaultScript
                         self.pop_mode(); // TemplateScript
@@ -458,9 +492,10 @@ impl<'a> Lexer<'a> {
                 let start = self.pos;
                 self.advance(); // consume <
                 let rest = &self.source[self.pos..];
-                if rest.starts_with("bx:script") || rest.starts_with("bx:output") {
+                let prefix_len = self.tag_prefix.len() as u32;
+                if self.at_open_tag("script") || self.at_open_tag("output") {
                     // Check which tag
-                    let is_script = rest.starts_with("bx:script");
+                    let is_script = self.at_open_tag("script");
                     if is_script {
                         // <bx:script ...> — switch to script parsing mode
                         self.push_token(TokenKind::ScriptStart, start, self.pos, self.line, self.col.saturating_sub(1));
@@ -476,20 +511,20 @@ impl<'a> Lexer<'a> {
                     } else {
                         // <bx:output ...> — parse component normally, push output mode
                         self.push_mode(LexerMode::TemplateOutput);
-                        self.pos += 3; self.col += 3; // skip bx:
+                        self.pos += prefix_len as usize; self.col += prefix_len; // skip the prefix
                         self.tokenize_component_name(start);
                         self.push_mode(LexerMode::TemplateOutput);
                         return;
                     }
-                } else if rest.starts_with("bx:") {
+                } else if self.at_ci(self.tag_prefix) {
                     self.push_mode(LexerMode::TemplateComponentName);
-                    self.pos += 3; self.col += 3; // skip bx:
+                    self.pos += prefix_len as usize; self.col += prefix_len; // skip the prefix
                     self.tokenize_component_name(start);
                     return; // tokenize_component_name handles the rest
-                } else if rest.starts_with("/bx:") {
-                    let is_output_close = rest.starts_with("/bx:output");
+                } else if self.at_ci(&format!("/{}", self.tag_prefix)) {
+                    let is_output_close = self.at_ci(&format!("/{}output", self.tag_prefix));
                     self.push_mode(LexerMode::TemplateEndComponent);
-                    self.pos += 4; self.col += 4; // skip /bx:
+                    self.pos += prefix_len as usize + 1; self.col += prefix_len + 1; // skip /prefix
                     self.tokenize_component_name(start);
                     if is_output_close {
                         self.pop_mode();
