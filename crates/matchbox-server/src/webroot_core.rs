@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
-use matchbox_compiler::{compiler::Compiler, parser};
+use matchbox_compiler::cf::{parse_source, SourceKind};
+use matchbox_compiler::compiler::Compiler;
 use matchbox_vm::types::{BxVM, BxValue};
 use matchbox_vm::vm::VM;
 use matchbox_vm::vm::chunk::Chunk;
@@ -409,11 +410,8 @@ fn form_scope_from_request(request: &WebrootRequest) -> HashMap<String, String> 
 }
 
 fn compile_template(asset_path: &str, source: &str) -> Result<Chunk> {
-    let ast = if asset_path.ends_with(".bxm") {
-        parser::parse_bxm(source, Some(asset_path))?
-    } else {
-        parser::parse(source, Some(asset_path))?
-    };
+    let kind = SourceKind::from_path(std::path::Path::new(asset_path));
+    let ast = parse_source(kind, source, Some(asset_path))?;
     let mut compiler = Compiler::new(asset_path);
     compiler.compile(&ast, source)
 }
@@ -509,7 +507,7 @@ fn contains_hidden_segment(path: &str) -> bool {
 }
 
 fn first_existing_index<S: AssetStore>(store: &S, dir: &str) -> Result<Option<String>> {
-    for index in ["index.bxm", "index.bxs"] {
+    for index in ["index.bxm", "index.bxs", "index.cfm"] {
         let candidate = if dir.is_empty() {
             index.to_string()
         } else {
@@ -523,7 +521,7 @@ fn first_existing_index<S: AssetStore>(store: &S, dir: &str) -> Result<Option<St
 }
 
 fn is_template_path(path: &str) -> bool {
-    path.ends_with(".bxm") || path.ends_with(".bxs")
+    path.ends_with(".bxm") || path.ends_with(".bxs") || path.ends_with(".cfm")
 }
 
 fn text_response(status: u16, body: &str) -> WebrootResponse {
@@ -679,6 +677,56 @@ mod tests {
 
         assert_eq!(response.status, 200);
         assert_eq!(String::from_utf8(response.body).unwrap(), "Hello MatchBox");
+    }
+
+    #[test]
+    fn cf_template_is_rendered() {
+        let temp = tempfile::tempdir().unwrap();
+        let webroot = temp.path().canonicalize().unwrap();
+        std::fs::write(
+            webroot.join("hello.cfm"),
+            "<cfset greeting = \"Hello\"><cfoutput>#greeting# #url.name#</cfoutput>",
+        )
+        .unwrap();
+
+        let engine =
+            WebrootEngine::new(FileSystemAssetStore::new(webroot), WebrootConfig::default());
+        let response = engine
+            .handle(WebrootRequest {
+                method: "GET".to_string(),
+                path: "/hello.cfm".to_string(),
+                query: HashMap::from([("name".to_string(), "MatchBox".to_string())]),
+                form: Default::default(),
+                headers: Default::default(),
+                body: Vec::new(),
+            })
+            .unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(String::from_utf8(response.body).unwrap(), "Hello MatchBox");
+    }
+
+    #[test]
+    fn index_cfm_is_a_directory_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let webroot = temp.path().canonicalize().unwrap();
+        std::fs::write(webroot.join("index.cfm"), "<cfoutput>CF Home</cfoutput>").unwrap();
+
+        let engine =
+            WebrootEngine::new(FileSystemAssetStore::new(webroot), WebrootConfig::default());
+        let response = engine
+            .handle(WebrootRequest {
+                method: "GET".to_string(),
+                path: "/".to_string(),
+                query: Default::default(),
+                form: Default::default(),
+                headers: Default::default(),
+                body: Vec::new(),
+            })
+            .unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(String::from_utf8(response.body).unwrap(), "CF Home");
     }
 
     #[test]
