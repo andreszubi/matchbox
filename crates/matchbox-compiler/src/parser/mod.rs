@@ -108,12 +108,12 @@ pub fn parse_cf_script(source: &str, filename: Option<&str>) -> Result<Vec<State
     match Parser::new(source, lexed.tokens(), filename).parse_program() {
         Ok(stmts) => Ok(stmts),
         Err(err) => {
-            if let Some(parse_err) = err.downcast_ref::<ParseError>() {
-                if parse_err.source.is_none() {
-                    let mut enriched = parse_err.clone();
-                    enriched.source = Some(source.to_string());
-                    return Err(enriched.into());
-                }
+            if let Some(parse_err) = err.downcast_ref::<ParseError>()
+                && parse_err.source.is_none()
+            {
+                let mut enriched = parse_err.clone();
+                enriched.source = Some(source.to_string());
+                return Err(enriched.into());
             }
             Err(err)
         }
@@ -628,6 +628,17 @@ impl<'a> Parser<'a> {
         let params = self.parse_params()?;
         self.expect(TokenKind::RightParen)?;
 
+        // CF-style attributes after the parameter list:
+        //   function f() output=false returnformat="json" { ... }
+        // Each one is stored like the annotation form `@output(false)`.
+        while self.peek_is(TokenKind::Identifier) && self.kind(1) == Some(TokenKind::Equal) {
+            let attr_line = self.peek_line();
+            let attr_name = self.advance_lexeme().unwrap_or_default();
+            self.pos += 1; // =
+            let value = self.parse_attribute_value(attr_line)?;
+            attributes.push(Attribute { name: attr_name, args: vec![Argument { name: None, value }] });
+        }
+
         let body = if self.peek_is(TokenKind::LeftBrace) {
             self.pos += 1; // {
             FunctionBody::Block(self.parse_block()?)
@@ -642,6 +653,23 @@ impl<'a> Parser<'a> {
             StatementKind::FunctionDecl { name, attributes, modifiers, return_type, params, body },
             line,
         ))
+    }
+
+    /// The value of a `name=value` function attribute: a string, number or
+    /// boolean, or a bare word (stored as a string, as CF does).
+    fn parse_attribute_value(&mut self, line: u32) -> Result<Expression> {
+        match self.peek_kind() {
+            Some(TokenKind::String) | Some(TokenKind::StringStart) | Some(TokenKind::Number)
+            | Some(TokenKind::True) | Some(TokenKind::False) => self.parse_primary(),
+            Some(TokenKind::Identifier) => {
+                let word = self.advance_lexeme().unwrap_or_default();
+                Ok(Expression::new(
+                    ExpressionKind::Literal(Literal::String(vec![StringPart::Text(word)])),
+                    line,
+                ))
+            }
+            _ => Err(self.error_current("expected a value after '=' in function attribute").into()),
+        }
     }
 
     fn parse_params(&mut self) -> Result<Vec<FunctionParam>> {
@@ -1758,7 +1786,14 @@ impl<'a> Parser<'a> {
                     Expression::new(ExpressionKind::Literal(Literal::Null), line),
                 ));
             } else {
-                let key = self.parse_expression()?;
+                // `{ a = 1 }`: if the token after the key is `=`, read just the
+                // key itself. A full expression would swallow `a = 1` as an
+                // assignment and leave no separator behind.
+                let key = if self.kind(1) == Some(TokenKind::Equal) {
+                    self.parse_primary()?
+                } else {
+                    self.parse_expression()?
+                };
                 if !matches!(self.peek_kind(), Some(TokenKind::Colon) | Some(TokenKind::Equal)) {
                     return Err(self
                         .error_current("expected ':' or '=' in struct literal")
@@ -2267,5 +2302,60 @@ mod tests {
         let a = parse("mod = 5; y = mod MOD 2;", None).unwrap();
         let b = parse("mod = 5; y = mod % 2;", None).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn struct_literal_accepts_equals() {
+        let cases = [
+            ("s = { a = 1 };", "s = { a : 1 };"),
+            ("s = {a=1};", "s = {a:1};"),
+            ("s = { a = 1, b = 2 };", "s = { a : 1, b : 2 };"),
+            ("s = { \"a\" = 1 };", "s = { \"a\" : 1 };"),
+            ("s = { a = 1, b : 2 };", "s = { a : 1, b : 2 };"),
+            ("s = { a = { b = 2 } };", "s = { a : { b : 2 } };"),
+        ];
+        for (equals, colon) in cases {
+            let a = parse(equals, None).unwrap();
+            let b = parse(colon, None).unwrap();
+            assert_eq!(a, b, "source: {equals}");
+        }
+    }
+
+    #[test]
+    fn function_attributes_after_params() {
+        let with = parse("function f() output=false { return 1; }", None).unwrap();
+        let without = parse("function f() { return 1; }", None).unwrap();
+        match (&with[0].kind, &without[0].kind) {
+            (
+                StatementKind::FunctionDecl { name, params, body, attributes, .. },
+                StatementKind::FunctionDecl { name: name2, params: params2, body: body2, .. },
+            ) => {
+                // The attribute is recorded like `@output(false)`...
+                assert_eq!(attributes.len(), 1);
+                assert_eq!(attributes[0].name, "output");
+                assert_eq!(attributes[0].args.len(), 1);
+                assert_eq!(attributes[0].args[0].value.kind, ExpressionKind::Literal(Literal::Boolean(false)));
+                // ...and everything else is the same as the plain function.
+                assert_eq!((name, params, body), (name2, params2, body2));
+            }
+            other => panic!("Expected two FunctionDecls, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn several_function_attributes_and_bare_words() {
+        let ast = parse("function f() output=\"false\" returnformat=json { }", None).unwrap();
+        match &ast[0].kind {
+            StatementKind::FunctionDecl { attributes, .. } => {
+                let names: Vec<&str> = attributes.iter().map(|a| a.name.as_str()).collect();
+                assert_eq!(names, ["output", "returnformat"]);
+                // A bare word value is stored as a string, like a quoted one.
+                assert_eq!(
+                    attributes[1].args[0].value.kind,
+                    ExpressionKind::Literal(Literal::String(vec![StringPart::Text("json".to_string())]))
+                );
+            }
+            other => panic!("Expected FunctionDecl, got {:?}", other),
+        }
     }
 }
