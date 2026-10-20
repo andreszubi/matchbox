@@ -4,6 +4,7 @@ use matchbox_vm::types::{BxVM, BxValue};
 use matchbox_vm::vm::VM;
 use matchbox_vm::vm::chunk::Chunk;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
@@ -542,6 +543,22 @@ fn is_template_path(path: &str) -> bool {
     path.ends_with(".bxm") || path.ends_with(".bxs")
 }
 
+fn content_etag(bytes: &[u8]) -> String {
+    let hex: String = Sha256::digest(bytes).iter().map(|b| format!("{:02x}", b)).collect();
+    format!("\"{}\"", hex)
+}
+fn if_none_match_matches(header: &str, etag: &str) -> bool {
+    let header = header.trim();
+    if header == "*" {
+        return true;
+    }
+    let current = etag.strip_prefix("W/").unwrap_or(etag);
+    header
+        .split(',')
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())
+        .any(|candidate| candidate.strip_prefix("W/").unwrap_or(candidate) == current)
+}
 fn text_response(status: u16, body: &str) -> WebrootResponse {
     WebrootResponse {
         status,
@@ -553,6 +570,32 @@ fn text_response(status: u16, body: &str) -> WebrootResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn etag_is_quoted_sha256_and_stable() {
+        let a = content_etag(b"body {color: red;}");
+        assert!(a.starts_with('"') && a.ends_with('"'));
+        assert_eq!(a.len(), 66);
+        assert_eq!(a, content_etag(b"body {color: red;}"));
+        assert_ne!(a, content_etag(b"body {color: blue;}"));
+    }
+    #[test]
+    fn if_none_match_matches_works() {
+        let tag = "\"abc\"";
+        assert!(if_none_match_matches("\"abc\"", tag));
+        assert!(if_none_match_matches("W/\"abc\"", tag));
+        assert!(if_none_match_matches("\"x\", \"abc\"", tag));
+        assert!(if_none_match_matches("\"x\",W/\"abc\"", tag));
+        assert!(if_none_match_matches("*", tag));
+        assert!(if_none_match_matches("  *  ", tag));
+        assert!(!if_none_match_matches("\"abd\"", tag));
+        assert!(!if_none_match_matches("abc", tag));
+        assert!(!if_none_match_matches("", tag));
+        assert!(!if_none_match_matches("w/\"abc\"", tag));
+        assert!(if_none_match_matches("\t\"abc\"\t", tag));
+        assert!(if_none_match_matches("\"abc\",", tag));
+        assert!(if_none_match_matches("\"abc\", \"abc\"", tag));
+        assert!(if_none_match_matches("\"abc\"", "W/\"abc\""));
+    }
 
     #[test]
     fn get_static_asset_returns_content_type_and_body() {
