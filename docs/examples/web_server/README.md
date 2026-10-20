@@ -52,7 +52,7 @@ Static files such as `styles.css` are sent with an `ETag` header: a fingerprint 
 2.  **Next visit, file unchanged:** the browser sends the tag back in an `If-None-Match` header. The tags match, so the server answers `304 Not Modified` with no body, and the browser reuses its cached copy.
 3.  **File edited:** the contents have a new fingerprint, so the old tag no longer matches. The server sends the full file with its new `ETag`.
 
-Try it with the server from the previous section running. Your tag will differ from the one shown here; copy the `etag` value from the first response into the second:
+Try it with the server from the previous section running. The tag below is shortened, so copy the full `etag` value from your first response into the second. Your tag may also differ: on Windows, Git can check the file out with different line endings, which changes its bytes and therefore its hash.
 
 ```bash
 # first request: 200 with an ETag
