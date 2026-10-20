@@ -521,7 +521,7 @@ fn first_existing_index<S: AssetStore>(store: &S, dir: &str) -> Result<Option<St
 }
 
 fn is_template_path(path: &str) -> bool {
-    path.ends_with(".bxm") || path.ends_with(".bxs") || path.ends_with(".cfm")
+    path.ends_with(".bxm") || path.ends_with(".bxs") || path.ends_with(".cfm") || path.ends_with(".cfml")
 }
 
 fn text_response(status: u16, body: &str) -> WebrootResponse {
@@ -704,6 +704,29 @@ mod tests {
 
         assert_eq!(response.status, 200);
         assert_eq!(String::from_utf8(response.body).unwrap(), "Hello MatchBox");
+    }
+
+    #[test]
+    fn cfml_page_is_rendered_not_served_as_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let webroot = temp.path().canonicalize().unwrap();
+        std::fs::write(webroot.join("page.cfml"), "<cfset x = 2><cfoutput>x=#x#</cfoutput>").unwrap();
+
+        let engine =
+            WebrootEngine::new(FileSystemAssetStore::new(webroot), WebrootConfig::default());
+        let response = engine
+            .handle(WebrootRequest {
+                method: "GET".to_string(),
+                path: "/page.cfml".to_string(),
+                query: Default::default(),
+                form: Default::default(),
+                headers: Default::default(),
+                body: Vec::new(),
+            })
+            .unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(String::from_utf8(response.body).unwrap(), "x=2");
     }
 
     #[test]

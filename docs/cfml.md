@@ -8,7 +8,7 @@ The file extension picks the parser:
 
 | Extension | Read as |
 | :--- | :--- |
-| `.cfm` | CF tag template (`<cfset>`, `<cfoutput>`, …) |
+| `.cfm`, `.cfml` | CF tag template (`<cfset>`, `<cfoutput>`, …) |
 | `.cfc`, `.cfs` | CFScript |
 | `.bxm` | BoxLang template |
 | `.bx`, `.bxs`, anything else | BoxLang script |
@@ -87,4 +87,5 @@ These come from MatchBox's existing `.bxm` template runtime, not from the CF par
 - Upper-casing struct keys the way some CF engines do
 - CF `output=` semantics on functions and components
 - CF custom tags (`<cfx_mytag>`, `<cf_mytag>`): they stop with the parse error "CF custom tags are not supported"
+- Tag-based components (`<cfcomponent>` in a `.cfc`): they stop with a parse error. Write components in script syntax, `component { … }`
 - `.cfm` / `.cfs` routes in [ESP32 embedded apps](building-and-deploying/esp32.md), which accept only `.bxm` and `.bxs`

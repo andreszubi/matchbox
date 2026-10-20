@@ -2,6 +2,8 @@
 //! AST the BoxLang parser produces, so the existing compiler and VM run it.
 
 use crate::ast::Statement;
+use crate::parser::ParseError;
+use crate::tokenizer::Span;
 use anyhow::Result;
 use std::path::Path;
 
@@ -17,7 +19,7 @@ pub enum SourceKind {
     BoxLangTemplate,
     /// `.cfc`, `.cfs`
     CfScript,
-    /// `.cfm`
+    /// `.cfm`, `.cfml`
     CfTemplate,
 }
 
@@ -29,7 +31,7 @@ impl SourceKind {
             .map(str::to_ascii_lowercase);
         match ext.as_deref() {
             Some("bxm") => Self::BoxLangTemplate,
-            Some("cfm") => Self::CfTemplate,
+            Some("cfm") | Some("cfml") => Self::CfTemplate,
             Some("cfc") | Some("cfs") => Self::CfScript,
             _ => Self::BoxLangScript,
         }
@@ -51,11 +53,33 @@ pub fn parse_source(kind: SourceKind, source: &str, filename: Option<&str>) -> R
             Ok(ast)
         }
         SourceKind::CfScript => {
+            reject_tag_based_script(source, filename)?;
             let mut ast = crate::parser::parse_cf_script(source, filename)?;
             transpile(&mut ast);
             Ok(ast)
         }
     }
+}
+
+/// CFScript can never start with `<`, so a .cfc/.cfs that does is tag-based CF
+/// (`<cfcomponent>`), which is not supported. Report that instead of a confusing
+/// parse or runtime error.
+fn reject_tag_based_script(source: &str, filename: Option<&str>) -> Result<()> {
+    let start = source.len() - source.trim_start().len();
+    if !source[start..].starts_with('<') {
+        return Ok(());
+    }
+    let before = &source[..start];
+    let line = 1 + before.matches('\n').count() as u32;
+    let col = 1 + (start - before.rfind('\n').map_or(0, |i| i + 1)) as u32;
+    let span = Span { start, end: start + 1, line, col };
+    Err(ParseError::new(
+        filename,
+        span,
+        "tag-based CF (such as <cfcomponent>) is not supported in .cfc/.cfs files; use script syntax: component { ... }",
+    )
+    .with_source(source)
+    .into())
 }
 
 #[cfg(test)]
@@ -67,6 +91,7 @@ mod tests {
         let cases = [
             ("page.cfm", SourceKind::CfTemplate),
             ("PAGE.CFM", SourceKind::CfTemplate),
+            ("page.cfml", SourceKind::CfTemplate),
             ("User.cfc", SourceKind::CfScript),
             ("job.cfs", SourceKind::CfScript),
             ("page.bxm", SourceKind::BoxLangTemplate),
@@ -77,5 +102,22 @@ mod tests {
         for (path, kind) in cases {
             assert_eq!(SourceKind::from_path(Path::new(path)), kind, "path: {path}");
         }
+    }
+
+    #[test]
+    fn cfml_parses_like_cfm() {
+        let src = "<cfset x = 1><cfoutput>#x#</cfoutput>";
+        let cfml = parse_source(SourceKind::from_path(Path::new("page.cfml")), src, None).unwrap();
+        let cfm = parse_source(SourceKind::from_path(Path::new("page.cfm")), src, None).unwrap();
+        assert_eq!(cfml, cfm);
+    }
+
+    #[test]
+    fn tag_based_components_report_a_clear_error() {
+        for src in ["<cfcomponent>\n</cfcomponent>", "\n  <!--- note --->\n<cfcomponent>"] {
+            let err = parse_source(SourceKind::CfScript, src, Some("User.cfc")).unwrap_err();
+            assert!(err.to_string().contains("tag-based CF"), "source: {src:?}, error: {err}");
+        }
+        assert!(parse_source(SourceKind::CfScript, "component { }", Some("User.cfc")).is_ok());
     }
 }
