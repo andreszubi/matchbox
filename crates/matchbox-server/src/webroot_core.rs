@@ -259,6 +259,22 @@ impl<S: AssetStore> WebrootEngine<S> {
             self.render_template(&asset_path, &source, &request)?
         } else {
             let mut headers = HashMap::new();
+            if matches!(method.as_str(), "GET" | "HEAD") {
+                let etag = content_etag(&bytes);
+                let matched = request
+                    .headers
+                    .get("if-none-match")
+                    .is_some_and(|value| if_none_match_matches(value, &etag));
+                headers.insert("etag".to_string(), etag);
+                if matched {
+                    // 304: no body and no Content-Type, only the validator
+                    return Ok(WebrootResponse {
+                        status: 304,
+                        headers,
+                        body: Vec::new(),
+                    });
+                }
+            }
             headers.insert(
                 "content-type".to_string(),
                 mime_guess::from_path(&asset_path)

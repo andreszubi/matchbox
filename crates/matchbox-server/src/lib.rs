@@ -546,6 +546,11 @@ async fn handler(
 fn webroot_response_to_axum(response: WebrootResponse) -> axum::response::Response {
     let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut axum_response = (status, response.body).into_response();
+    if status == StatusCode::NOT_MODIFIED {
+        // (status, Vec<u8>).into_response() adds "content-type: application/octet-stream";
+        // a 304 has no body, so it must not advertise one.
+        axum_response.headers_mut().remove(header::CONTENT_TYPE);
+    }
     for (name, value) in response.headers {
         if let (Ok(name), Ok(value)) = (
             header::HeaderName::from_bytes(name.as_bytes()),
@@ -810,5 +815,57 @@ mod tests {
         assert!(err.to_string().contains("rust:"));
         assert!(err.to_string().contains("WASI HTTP"));
         assert!(err.to_string().contains("index.bxs"));
+    }
+
+    #[tokio::test]
+    async fn adapter_returns_304_with_etag_and_empty_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let webroot = temp.path().to_path_buf().canonicalize().unwrap();
+        std::fs::write(webroot.join("app.js"), "console.log(1);").unwrap();
+        let state = setup_test_state(webroot);
+
+        // 1st request: 200 + ETag
+        let res = handler(
+            State(state.clone()),
+            Method::GET,
+            Some(AxumPath("app.js".to_string())),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            None,
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+        let etag = res
+            .headers()
+            .get("etag")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // 2nd request with If-None-Match (any casing; the adapter lowercases names)
+        let mut headers = HeaderMap::new();
+        headers.insert("If-None-Match", etag.parse().unwrap());
+        let res = handler(
+            State(state.clone()),
+            Method::GET,
+            Some(AxumPath("app.js".to_string())),
+            Query(HashMap::new()),
+            headers,
+            None,
+        )
+        .await
+        .into_response();
+        assert_eq!(res.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(res.headers().get("etag").unwrap().to_str().unwrap(), etag);
+        assert!(
+            res.headers().get("content-type").is_none(),
+            "304 must not claim a content type"
+        );
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(body.is_empty());
     }
 }
