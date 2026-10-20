@@ -63,9 +63,10 @@ cargo run -p matchbox_server -- --port 8080 --webroot my-site
 | `NOT x`, `a MOD b` | ✅ Works, same as `!x` and `a % b` (in BoxLang code too) |
 | `GT`, `EQ`, `NEQ`, `GTE`, `LTE`, `IS`, `IS NOT`, `CONTAINS`, `AND`, `OR`, `EQV` | ✅ Works |
 | `var`, typed parameters, `try` / `catch` in CFScript | ✅ Works |
-| Function attributes after the parameter list: `function f() output=false { }` | ❌ Not supported yet |
-| Struct literals with `=`: `{ a = 1 }` | ❌ Not supported yet (use `{ a : 1 }`) |
-| CF-only names (`valueArray()`, `queryGetRow()`, `getTemplatePath()`, `cfcatch`, `cfhttp`, `cfquery`, `thistag`) | ❌ Not renamed to their BoxLang equivalents yet |
+| Function attributes after the parameter list: `function f() output=false { }` | ✅ Parses, stored like the annotation `@output(false)` (CF `output=` behavior is not applied) |
+| Struct literals with `=`: `{ a = 1 }` | ✅ Works, same as `{ a : 1 }` |
+| CF-only functions: `valueArray()`, `queryGetRow()`, `getTemplatePath()` | ✅ Renamed to `queryColumnData()`, `queryRowData()`, `getBaseTemplatePath()` (the query functions need the `bif-datasource` build feature) |
+| CF-only names: `cfcatch`, `cfthread`, `cffile`, `cfftp`, `cfhttp`, `cfquery`, `cfdocument`, `cfstoredproc`, `thistag` | ✅ Renamed to `bxcatch`, `bxthread`, …, `thiscomponent`. Struct keys, member names, named-argument names and user functions with these names are left alone |
 
 ### Known Template Bugs
 

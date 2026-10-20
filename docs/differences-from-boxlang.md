@@ -34,7 +34,7 @@ MatchBox is 100% JVM-independent. It does not use the JRE, load JARs, or run on 
 
 ### Partial CFML / CFScript Support
 
-The JVM BoxLang runtime includes extensive compatibility utilities for CFML. MatchBox can parse ColdFusion source (`.cfm` tag pages, `.cfc` components and `.cfs` scripts) into the same syntax tree as BoxLang, so CF tags such as `<cfset>`, `<cfoutput>` and `<cfif>`, CFScript `component`, and the `NOT` / `MOD` operators run unchanged.
+The JVM BoxLang runtime includes extensive compatibility utilities for CFML. MatchBox can parse ColdFusion source (`.cfm` tag pages, `.cfc` components and `.cfs` scripts) into the same syntax tree as BoxLang, so CF tags such as `<cfset>`, `<cfoutput>` and `<cfif>`, CFScript `component`, the `NOT` / `MOD` operators and `{ a = 1 }` structs run unchanged. CF-only names such as `valueArray()` and `cfcatch` are renamed to their BoxLang equivalents.
 
 It does not include the rest of the JVM's CF compatibility layer: no tags inside script, no `<cfquery>`, no Adobe vs. Lucee engine switches, no upper-cased struct keys, and no CF custom tags. See [ColdFusion (CFML)](cfml.md) for the full support table.
 
