@@ -38,7 +38,7 @@ From the MatchBox project root, run it:
 cargo run -- hello.cfm
 ```
 
-It prints:
+After two blank lines (the line breaks after the two `<cfset>` tags are output as text, as in other CF engines), it prints:
 
 ```text
 Hello, World!
