@@ -331,12 +331,30 @@ impl<S: AssetStore + Send + Sync + 'static> WebrootEngine<S> {
             if !matches!(method.as_str(), "GET" | "HEAD" | "POST") {
                 return Ok(text_response(405, "Method Not Allowed"));
             }
-            let headers = vec![(
+            let etag = matches!(method.as_str(), "GET" | "HEAD").then(|| content_etag(&bytes));
+            if let Some(etag) = &etag {
+                let matched = request
+                    .headers
+                    .get("if-none-match")
+                    .is_some_and(|value| if_none_match_matches(value, etag));
+                if matched {
+                    // 304: no body, no Content-Type and no Content-Length, only the validator
+                    return Ok(WebrootResponse {
+                        status: 304,
+                        headers: vec![("etag".to_string(), etag.clone())],
+                        body: Vec::new(),
+                    });
+                }
+            }
+            let mut headers = vec![(
                 "content-type".to_string(),
                 mime_guess::from_path(&asset_path)
                     .first_or_octet_stream()
                     .to_string(),
             )];
+            if let Some(etag) = etag {
+                headers.push(("etag".to_string(), etag));
+            }
             WebrootResponse {
                 status: 200,
                 headers,
