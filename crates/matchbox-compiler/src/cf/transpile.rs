@@ -34,7 +34,7 @@ const IDENTIFIER_RENAMES: &[(&str, &str)] = &[
 
 /// Rename CF-only names in `stmts` to their BoxLang equivalents.
 pub fn transpile(stmts: &mut [Statement]) {
-    let pass = Transpiler { user_functions: collect_function_names(stmts) };
+    let mut pass = Transpiler { user_functions: collect_function_names(stmts), scopes: Vec::new() };
     pass.stmts(stmts);
 }
 
@@ -70,16 +70,25 @@ fn collect_function_names(stmts: &[Statement]) -> HashSet<String> {
 
 struct Transpiler {
     user_functions: HashSet<String>,
+    /// Parameter names (lowercase) of the functions we are currently inside,
+    /// innermost last. A name declared as a parameter is the user's own
+    /// variable there, so it is not renamed (BoxLang's
+    /// `isInFunctionWithArgNamed`).
+    scopes: Vec<HashSet<String>>,
 }
 
 impl Transpiler {
-    fn stmts(&self, stmts: &mut [Statement]) {
+    fn stmts(&mut self, stmts: &mut [Statement]) {
         for stmt in stmts {
             self.stmt(stmt);
         }
     }
 
-    fn rename_identifier(&self, name: &mut String) {
+    fn rename_identifier(&mut self, name: &mut String) {
+        let lower = name.to_ascii_lowercase();
+        if self.scopes.iter().any(|scope| scope.contains(&lower)) {
+            return;
+        }
         if let Some(to) = lookup(IDENTIFIER_RENAMES, name) {
             *name = to.to_string();
         }
@@ -88,7 +97,7 @@ impl Transpiler {
     // Every variant is listed on purpose, with no `_ =>` catch-all: if someone
     // adds a new kind of statement to the AST, this stops compiling until they
     // decide how the rename pass should handle it.
-    fn stmt(&self, stmt: &mut Statement) {
+    fn stmt(&mut self, stmt: &mut Statement) {
         match &mut stmt.kind {
             StatementKind::Import { .. }
             | StatementKind::Continue
@@ -107,10 +116,15 @@ impl Transpiler {
                 for attribute in attributes {
                     self.args(&mut attribute.args);
                 }
-                self.params(params);
-                self.body(body);
+                self.function(params, body);
             }
-            StatementKind::ForLoop { collection, body, .. } => {
+            StatementKind::ForLoop { item, index, collection, body } => {
+                // `for (cfquery in rows)` declares the loop variable by name,
+                // so it gets the same rename as its uses in the body.
+                self.rename_identifier(item);
+                if let Some(index) = index {
+                    self.rename_identifier(index);
+                }
                 self.expr(collection);
                 self.stmts(body);
             }
@@ -187,7 +201,7 @@ impl Transpiler {
         }
     }
 
-    fn expr(&self, expr: &mut Expression) {
+    fn expr(&mut self, expr: &mut Expression) {
         match &mut expr.kind {
             ExpressionKind::Identifier(name) => self.rename_identifier(name),
             ExpressionKind::FunctionCall { base, args } => {
@@ -238,7 +252,7 @@ impl Transpiler {
         }
     }
 
-    fn literal(&self, literal: &mut Literal) {
+    fn literal(&mut self, literal: &mut Literal) {
         match literal {
             Literal::Number(_) | Literal::Boolean(_) | Literal::Null => {}
             Literal::String(parts) => {
@@ -265,14 +279,11 @@ impl Transpiler {
                     self.expr(value);
                 }
             }
-            Literal::Function { params, body, .. } => {
-                self.params(params);
-                self.body(body);
-            }
+            Literal::Function { params, body, .. } => self.function(params, body),
         }
     }
 
-    fn target(&self, target: &mut AssignmentTarget) {
+    fn target(&mut self, target: &mut AssignmentTarget) {
         match target {
             AssignmentTarget::Identifier(name) => self.rename_identifier(name),
             AssignmentTarget::Member { base, .. } => self.expr(base),
@@ -283,7 +294,7 @@ impl Transpiler {
         }
     }
 
-    fn body(&self, body: &mut FunctionBody) {
+    fn body(&mut self, body: &mut FunctionBody) {
         match body {
             FunctionBody::Block(stmts) => self.stmts(stmts),
             FunctionBody::Expression(e) => self.expr(e),
@@ -291,7 +302,18 @@ impl Transpiler {
         }
     }
 
-    fn params(&self, params: &mut [FunctionParam]) {
+    /// A function declaration or closure: its parameter names shadow the
+    /// rename tables inside its body.
+    fn function(&mut self, params: &mut [FunctionParam], body: &mut FunctionBody) {
+        // Defaults are inside the function too: in `f(cfhttp, b = cfhttp)`
+        // the default refers to the parameter.
+        self.scopes.push(params.iter().map(|p| p.name.to_ascii_lowercase()).collect());
+        self.params(params);
+        self.body(body);
+        self.scopes.pop();
+    }
+
+    fn params(&mut self, params: &mut [FunctionParam]) {
         for param in params {
             if let Some(default) = &mut param.default_value {
                 self.expr(default);
@@ -299,7 +321,7 @@ impl Transpiler {
         }
     }
 
-    fn args(&self, args: &mut [Argument]) {
+    fn args(&mut self, args: &mut [Argument]) {
         // Named-argument names (`f(cfhttp = 1)`) are parameter names, not
         // variables, so only the values are walked.
         for arg in args {
@@ -371,6 +393,32 @@ mod tests {
         // `cfcatch` here is a struct key and a property name, not a variable.
         let src = "s = { cfcatch : 1 }; y = obj.cfhttp; f(cfquery = 2);";
         assert_renames_to(src, src);
+    }
+
+    #[test]
+    fn parameter_names_are_not_renamed_inside_their_function() {
+        // The parameter is the user's own variable inside the function.
+        for src in [
+            "function show(cfhttp) { return \"got \" & cfhttp; }",
+            "x = (cffile) => cffile * 2;",
+            "x = function(cfquery) { return cfquery; };",
+            "function f(cfhttp, b = cfhttp) { return b; }",
+        ] {
+            assert_renames_to(src, src);
+        }
+        // Outside the function, the same name is still renamed.
+        assert_renames_to(
+            "function f(cfhttp) { return cfhttp; } y = cfhttp;",
+            "function f(cfhttp) { return cfhttp; } y = bxhttp;",
+        );
+    }
+
+    #[test]
+    fn loop_variables_are_renamed_with_their_uses() {
+        assert_renames_to(
+            "for (cfquery in [1, 2]) { y = cfquery; }",
+            "for (bxquery in [1, 2]) { y = bxquery; }",
+        );
     }
 
     #[test]

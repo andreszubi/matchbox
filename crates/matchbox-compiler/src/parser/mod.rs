@@ -164,11 +164,14 @@ struct Parser<'a> {
     tokens: &'a [SyntaxToken],
     pos: usize,
     filename: Option<&'a str>,
+    /// Token index of a `{` that starts a statement. That brace is not a
+    /// struct literal where `=` may separate keys (see `parse_struct_members`).
+    statement_brace: Option<usize>,
 }
 
 impl<'a> Parser<'a> {
     fn new(source: &'a str, tokens: &'a [SyntaxToken], filename: Option<&'a str>) -> Self {
-        Self { source, tokens, pos: 0, filename }
+        Self { source, tokens, pos: 0, filename, statement_brace: None }
     }
 
     fn kind(&self, offset: usize) -> Option<TokenKind> {
@@ -185,6 +188,15 @@ impl<'a> Parser<'a> {
 
     fn peek_line(&self) -> u32 {
         self.tokens.get(self.pos).map(|t| t.span.line).unwrap_or(0)
+    }
+
+    /// True when no line break separates the current token from the one
+    /// before it.
+    fn on_same_line_as_previous_token(&self) -> bool {
+        match (self.pos.checked_sub(1).and_then(|i| self.tokens.get(i)), self.tokens.get(self.pos)) {
+            (Some(prev), Some(cur)) => !self.source[prev.span.end..cur.span.start].contains('\n'),
+            _ => false,
+        }
     }
 
     /// Span of the token under the cursor. Falls back to a zero-length span at
@@ -293,7 +305,16 @@ impl<'a> Parser<'a> {
             // word, so it is only an operator here, between two operands, and
             // it still works as an ordinary variable name elsewhere.
             // Same precedence (11) as `%`, and the same "%" operator string.
-            TokenKind::Identifier if current_text == "mod" => Some((11, "%".to_string(), 1)),
+            // Semicolons are optional, so `mod` must be on the same line as the
+            // left operand, and not followed by `=`: otherwise `x = 10` then
+            // `mod(3)` or `mod = 9` on the next line would be misread.
+            TokenKind::Identifier
+                if current_text == "mod"
+                    && self.on_same_line_as_previous_token()
+                    && self.kind(1) != Some(TokenKind::Equal) =>
+            {
+                Some((11, "%".to_string(), 1))
+            }
             TokenKind::Not => {
                 if matches!(self.kind(1), Some(TokenKind::Contains)) {
                     Some((3, "not contains".to_string(), 2))
@@ -411,6 +432,9 @@ impl<'a> Parser<'a> {
                 return self.parse_destructure_assignment(line);
             }
             Some(_) => {
+                if self.peek_is(TokenKind::LeftBrace) {
+                    self.statement_brace = Some(self.pos);
+                }
                 let expr = self.parse_expression()?;
                 // Consume optional semicolon
                 if self.peek_is(TokenKind::Semicolon) { self.pos += 1; }
@@ -1664,12 +1688,16 @@ impl<'a> Parser<'a> {
                 Ok(Expression::new(ExpressionKind::Identifier(name), line))
             }
             Some(TokenKind::LeftBrace) => {
+                let brace = self.pos;
                 self.pos += 1; // {
                 if self.peek_is(TokenKind::RightBrace) {
                     self.pos += 1;
                     return Ok(Expression::new(ExpressionKind::Literal(Literal::Struct(Vec::new())), line));
                 }
-                let members = self.parse_struct_members()?;
+                // `{ a = 1 }` as a whole statement is a block in BoxLang, not a
+                // struct, so `=` keys are only accepted where a value is expected.
+                let allow_equals = self.statement_brace != Some(brace);
+                let members = self.parse_struct_members(allow_equals)?;
                 self.expect(TokenKind::RightBrace)?;
                 Ok(Expression::new(ExpressionKind::Literal(Literal::Struct(members)), line))
             }
@@ -1774,7 +1802,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_struct_members(&mut self) -> Result<Vec<(Expression, Expression)>> {
+    fn parse_struct_members(&mut self, allow_equals: bool) -> Result<Vec<(Expression, Expression)>> {
         let mut members = Vec::new();
         loop {
             let line = self.peek_line();
@@ -1789,7 +1817,7 @@ impl<'a> Parser<'a> {
                 // `{ a = 1 }`: if the token after the key is `=`, read just the
                 // key itself. A full expression would swallow `a = 1` as an
                 // assignment and leave no separator behind.
-                let key = if self.kind(1) == Some(TokenKind::Equal) {
+                let key = if allow_equals && self.kind(1) == Some(TokenKind::Equal) {
                     self.parse_primary()?
                 } else {
                     self.parse_expression()?
@@ -2356,6 +2384,47 @@ mod tests {
                 );
             }
             other => panic!("Expected FunctionDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mod_on_a_new_line_is_not_an_operator() {
+        // Semicolons are optional, so these lines are separate statements.
+        let cases = [
+            ("function mod(a) { return 0; }\nx = 10\nmod(3)\n", "function mod(a) { return 0; }\nx = 10;\nmod(3);\n"),
+            ("x = 5\nmod = 9\n", "x = 5;\nmod = 9;\n"),
+        ];
+        for (no_semicolons, semicolons) in cases {
+            let a = parse(no_semicolons, None).unwrap();
+            let b = parse(semicolons, None).unwrap();
+            assert_eq!(a, b, "source: {no_semicolons}");
+        }
+        // On the same line it is still the operator.
+        assert_eq!(parse("x = 10 MOD (1 + 2);", None).unwrap(), parse("x = 10 % (1 + 2);", None).unwrap());
+    }
+
+    #[test]
+    fn brace_starting_a_statement_is_not_an_equals_struct() {
+        // `{ a = 1 }` on its own is a block in BoxLang, not a struct. MatchBox
+        // has no block statement, so it stays a parse error rather than
+        // silently building a struct and throwing it away.
+        assert!(parse("a = 0\n{ a = 1 }\n", None).is_err());
+        assert!(parse("switch (1) { case 1: { a = 5 } }", None).is_err());
+        // Where a value is expected, `=` keys still work.
+        assert_eq!(parse("s = { a = 1 };", None).unwrap(), parse("s = { a : 1 };", None).unwrap());
+        assert_eq!(parse("f({ a = 1 });", None).unwrap(), parse("f({ a : 1 });", None).unwrap());
+        // Blocks that already worked keep working.
+        for src in ["if (x) { a = b }", "f = function() { a = 7 }", "g = () => { a = 8 }"] {
+            assert!(parse(src, None).is_ok(), "source: {src}");
+        }
+    }
+
+    #[test]
+    fn component_is_a_plain_name_in_cf_when_not_a_declaration() {
+        for src in ["component = 1;", "s = { component : 2 };", "x = s.component;", "function f(component) { return component; }"] {
+            let cf = parse_cf_script(src, None).unwrap();
+            let bx = parse(src, None).unwrap();
+            assert_eq!(cf, bx, "CF source: {src}");
         }
     }
 }

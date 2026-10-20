@@ -827,10 +827,15 @@ impl<'a> Lexer<'a> {
         }
 
         let kind = match keyword_or_ident(lexeme) {
-            // In CF files, `component` means the same as BoxLang's `class`.
-            // Only CF files get this, so BoxLang code can still use
-            // `component` as an ordinary variable name.
-            TokenKind::Identifier if self.cf_mode && lexeme.eq_ignore_ascii_case("component") => {
+            // In CF files, `component` starting a declaration means the same
+            // as BoxLang's `class`. Anywhere else (`component = 1`,
+            // `s.component`, `f(component)`) it stays an ordinary name, as in
+            // BoxLang's CF lexer. BoxLang files never get this mapping.
+            TokenKind::Identifier
+                if self.cf_mode
+                    && lexeme.eq_ignore_ascii_case("component")
+                    && starts_cf_component_decl(&self.source[end..]) =>
+            {
                 TokenKind::Class
             }
             other => other,
@@ -1222,6 +1227,23 @@ fn is_ident_start(ch: char) -> bool {
     ch.is_ascii_alphabetic() || ch == '_' || ch == '$'
 }
 
+/// `rest` is the source right after the word `component`. It starts a
+/// declaration when what follows is the body (`component {`) or an attribute
+/// (`component extends="Base" {`, `component output=false {`).
+fn starts_cf_component_decl(rest: &str) -> bool {
+    let rest = rest.trim_start();
+    if rest.starts_with('{') {
+        return true;
+    }
+    // An attribute: a name, then `=` (but not `==`).
+    let name_len = rest.find(|c: char| !is_ident_cont(c)).unwrap_or(rest.len());
+    if name_len == 0 {
+        return false;
+    }
+    let after = rest[name_len..].trim_start();
+    after.starts_with('=') && !after.starts_with("==")
+}
+
 fn is_ident_cont(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'
 }
@@ -1326,14 +1348,28 @@ mod tests {
 
     #[test]
     fn cf_mode_maps_component_to_class() {
-        // CF mode: `component` (any case) is the class keyword.
-        for src in ["component", "Component", "COMPONENT"] {
+        // CF mode: `component` (any case) starting a declaration is the class keyword.
+        for src in [
+            "component {",
+            "Component {",
+            "COMPONENT\n{",
+            "component extends=\"Base\" {",
+            "component output=false accessors=\"true\" {",
+        ] {
             let tokens = lex_cf_script(src).into_owned_tokens();
             assert_eq!(tokens[0].kind, TokenKind::Class, "CF source: {src}");
         }
         // BoxLang mode: `component` stays an ordinary name.
-        let tokens = tokenize("component");
+        let tokens = tokenize("component {");
         assert_eq!(tokens[0].kind, TokenKind::Identifier);
+    }
+
+    #[test]
+    fn cf_mode_keeps_component_as_a_name_elsewhere() {
+        for src in ["component = 1", "component == 1", "component;", "component)", "component.name", "component: 2"] {
+            let tokens = lex_cf_script(src).into_owned_tokens();
+            assert_eq!(tokens[0].kind, TokenKind::Identifier, "CF source: {src}");
+        }
     }
 
     #[test]
