@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **WASM blocking waits**: the scheduler's idle wait (`run_all`, `run_fiber_to_completion`) called `std::thread::sleep`, which also panics on `wasm32-unknown-unknown`, so `run_boxlang( "sleep( 1000 ); 1" )` from a `--target js` build trapped. On `wasm32` the wait now polls the clock, as the cooperative `pump_until_blocked` path already did. Native builds still sleep the thread.
 ### Added
 - **HTML Encoding**: Added `encodeForHTML()` and its `htmlEditFormat()` alias, matching BoxLang JVM output.
+- **ColdFusion Parsing**: Added a CF parsing module that runs `.cfm` tag templates, `.cfc` components and `.cfs` scripts by parsing them into the same AST as BoxLang. See [ColdFusion (CFML)](docs/cfml.md).
 
 ## [0.11.0] - 2026-10-02
 
