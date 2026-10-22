@@ -570,6 +570,7 @@ fn text_response(status: u16, body: &str) -> WebrootResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn etag_is_quoted_sha256_and_stable() {
         let a = content_etag(b"body {color: red;}");
@@ -595,6 +596,255 @@ mod tests {
         assert!(if_none_match_matches("\"abc\",", tag));
         assert!(if_none_match_matches("\"abc\", \"abc\"", tag));
         assert!(if_none_match_matches("\"abc\"", "W/\"abc\""));
+    }
+
+    const CSS: &str = "body {color: red;}";
+
+    fn req(method: &str, path: &str, if_none_match: Option<&str>) -> WebrootRequest {
+        let mut headers = HashMap::new();
+        if let Some(value) = if_none_match {
+            headers.insert("if-none-match".to_string(), value.to_string());
+        }
+        WebrootRequest {
+            method: method.to_string(),
+            path: path.to_string(),
+            headers,
+            ..Default::default()
+        }
+    }
+
+    fn fs_engine(
+        files: &[(&str, &str)],) -> (tempfile::TempDir, WebrootEngine<FileSystemAssetStore>) {
+        let temp = tempfile::tempdir().unwrap();
+        let webroot = temp.path().canonicalize().unwrap();
+        for (name, body) in files {
+            std::fs::write(webroot.join(name), body).unwrap();
+        }
+        let engine =
+            WebrootEngine::new(FileSystemAssetStore::new(webroot), WebrootConfig::default());
+        (temp, engine) // keep `temp` alive or the folder is deleted
+    }
+
+    fn embedded_engine(files: &[(&str, &str)]) -> WebrootEngine<EmbeddedAssetStore> {
+        let map = files
+            .iter()
+            .map(|(name, body)| (name.to_string(), body.as_bytes().to_vec()))
+            .collect();
+        WebrootEngine::new(EmbeddedAssetStore::new(map), WebrootConfig::default())
+    }
+
+    fn etag_of<S: AssetStore>(engine: &WebrootEngine<S>, path: &str) -> String {
+        engine
+            .handle(req("GET", path, None))
+            .unwrap()
+            .headers
+            .get("etag")
+            .expect("static asset has an etag")
+            .clone()
+    }
+
+    fn assert_not_modified(response: &WebrootResponse, tag: &str) {
+        assert_eq!(response.status, 304);
+        assert!(response.body.is_empty());
+        assert_eq!(response.headers.get("etag").map(String::as_str), Some(tag));
+        assert!(!response.headers.contains_key("content-type"));
+    }
+
+    #[test]
+    fn static_get_has_quoted_etag_on_both_stores() {
+        let (_temp, fs) = fs_engine(&[("styles.css", CSS)]);
+        let emb = embedded_engine(&[("styles.css", CSS)]);
+
+        for response in [
+            fs.handle(req("GET", "/styles.css", None)).unwrap(),
+            emb.handle(req("GET", "/styles.css", None)).unwrap(),
+        ] {
+            assert_eq!(response.status, 200);
+            let tag = response.headers.get("etag").expect("static asset has an etag");
+            assert!(tag.starts_with('"') && tag.ends_with('"'));
+            assert_eq!(
+                response.headers.get("content-type").map(String::as_str),
+                Some("text/css")
+            );
+            assert_eq!(response.body, CSS.as_bytes());
+        }
+    }
+
+    #[test]
+    fn same_bytes_same_tag_across_stores() {
+        let (_temp, fs) = fs_engine(&[("styles.css", CSS)]);
+        let emb = embedded_engine(&[("styles.css", CSS)]);
+
+        let tag = etag_of(&fs, "/styles.css");
+        assert_eq!(tag, etag_of(&emb, "/styles.css"));
+        assert_eq!(tag, content_etag(CSS.as_bytes()));
+    }
+
+    #[test]
+    fn edited_file_gets_new_tag_and_old_tag_gets_200() {
+        let (temp, fs) = fs_engine(&[("styles.css", CSS)]);
+        let old_tag = etag_of(&fs, "/styles.css");
+
+        std::fs::write(temp.path().join("styles.css"), "body { color: blue; }").unwrap();
+        let response = fs
+            .handle(req("GET", "/styles.css", Some(old_tag.as_str())))
+            .unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"body { color: blue; }");
+        assert_ne!(response.headers.get("etag"), Some(&old_tag));
+    }
+
+    #[test]
+    fn changed_embedded_bytes_get_new_tag() {
+        let before = embedded_engine(&[("styles.css", CSS)]);
+        let after = embedded_engine(&[("styles.css", "body { color: blue; }")]);
+        let old_tag = etag_of(&before, "/styles.css");
+
+        assert_ne!(old_tag, etag_of(&after, "/styles.css"));
+        let response = after
+            .handle(req("GET", "/styles.css", Some(old_tag.as_str())))
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"body { color: blue; }");
+    }
+
+    #[test]
+    fn matching_if_none_match_returns_304_for_get_and_head_on_both_stores() {
+        let (_temp, fs) = fs_engine(&[("styles.css", CSS)]);
+        let emb = embedded_engine(&[("styles.css", CSS)]);
+        let tag = etag_of(&fs, "/styles.css");
+
+        for method in ["GET", "HEAD"] {
+            for response in [
+                fs.handle(req(method, "/styles.css", Some(tag.as_str()))).unwrap(),
+                emb.handle(req(method, "/styles.css", Some(tag.as_str()))).unwrap(),
+            ] {
+                assert_not_modified(&response, &tag);
+            }
+        }
+    }
+
+    #[test]
+    fn head_without_header_returns_200_with_etag_and_no_body() {
+        let (_temp, fs) = fs_engine(&[("styles.css", CSS)]);
+        let emb = embedded_engine(&[("styles.css", CSS)]);
+
+        for response in [
+            fs.handle(req("HEAD", "/styles.css", None)).unwrap(),
+            emb.handle(req("HEAD", "/styles.css", None)).unwrap(),
+        ] {
+            assert_eq!(response.status, 200);
+            assert!(response.headers.contains_key("etag"));
+            assert_eq!(
+                response.headers.get("content-type").map(String::as_str),
+                Some("text/css")
+            );
+            assert!(response.body.is_empty());
+        }
+    }
+
+    #[test]
+    fn list_weak_and_wildcard_match_on_both_stores() {
+        let (_temp, fs) = fs_engine(&[("styles.css", CSS)]);
+        let emb = embedded_engine(&[("styles.css", CSS)]);
+        let tag = etag_of(&fs, "/styles.css");
+
+        for header in [format!("\"nope\", {tag}"), format!("W/{tag}"), "*".to_string()] {
+            for response in [
+                fs.handle(req("GET", "/styles.css", Some(header.as_str()))).unwrap(),
+                emb.handle(req("GET", "/styles.css", Some(header.as_str()))).unwrap(),
+            ] {
+                assert_not_modified(&response, &tag);
+            }
+        }
+    }
+
+    #[test]
+    fn non_matching_tag_returns_normal_200() {
+        let (_temp, fs) = fs_engine(&[("styles.css", CSS)]);
+        let emb = embedded_engine(&[("styles.css", CSS)]);
+
+        for response in [
+            fs.handle(req("GET", "/styles.css", Some("\"other\""))).unwrap(),
+            emb.handle(req("GET", "/styles.css", Some("\"other\""))).unwrap(),
+        ] {
+            assert_eq!(response.status, 200);
+            assert!(response.headers.contains_key("etag"));
+            assert_eq!(
+                response.headers.get("content-type").map(String::as_str),
+                Some("text/css")
+            );
+            assert_eq!(response.body, CSS.as_bytes());
+        }
+    }
+
+    #[test]
+    fn missing_file_with_wildcard_is_404() {
+        let (_temp, fs) = fs_engine(&[("styles.css", CSS)]);
+        let emb = embedded_engine(&[("styles.css", CSS)]);
+
+        for response in [
+            fs.handle(req("GET", "/missing.css", Some("*"))).unwrap(),
+            emb.handle(req("GET", "/missing.css", Some("*"))).unwrap(),
+        ] {
+            assert_eq!(response.status, 404);
+            assert!(!response.headers.contains_key("etag"));
+        }
+    }
+
+    #[test]
+    fn templates_never_get_an_etag_even_with_wildcard() {
+        let files = [("index.bxm", "<h1>Hi</h1>"), ("page.bxm", "<h1>Page</h1>")];
+        let (_temp, fs) = fs_engine(&files);
+        let emb = embedded_engine(&files);
+
+        for path in ["/", "/page.bxm"] {
+            for response in [
+                fs.handle(req("GET", path, Some("*"))).unwrap(),
+                emb.handle(req("GET", path, Some("*"))).unwrap(),
+            ] {
+                assert_eq!(response.status, 200);
+                assert!(!response.headers.contains_key("etag"));
+            }
+        }
+    }
+
+    #[test]
+    fn rewrite_target_template_never_gets_an_etag() {
+        let engine = WebrootEngine::new(
+            EmbeddedAssetStore::new(HashMap::from([(
+                "index.bxm".to_string(),
+                b"<h1>Rewrite</h1>".to_vec(),
+            )])),
+            WebrootConfig {
+                rewrites: true,
+                rewrite_file_name: "index.bxm".to_string(),
+            },
+        );
+
+        let response = engine
+            .handle(req("GET", "/no/such/path", Some("*")))
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert!(!response.headers.contains_key("etag"));
+    }
+
+    #[test]
+    fn hidden_and_traversal_still_403_with_wildcard() {
+        let files = [(".env", "SECRET=value"), ("styles.css", CSS)];
+        let (_temp, fs) = fs_engine(&files);
+        let emb = embedded_engine(&files);
+
+        for path in ["/.env", "/../outside.txt"] {
+            for response in [
+                fs.handle(req("GET", path, Some("*"))).unwrap(),
+                emb.handle(req("GET", path, Some("*"))).unwrap(),
+            ] {
+                assert_eq!(response.status, 403);
+                assert!(!response.headers.contains_key("etag"));
+            }
+        }
     }
 
     #[test]
