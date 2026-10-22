@@ -859,7 +859,7 @@ mod tests {
         assert_eq!(response.status, 304);
         assert!(response.body.is_empty());
         assert_eq!(response.headers.get("etag").map(String::as_str), Some(tag));
-        assert!(response.headers.get("content-type").is_none());
+        assert!(!response.headers.contains_key("content-type"));
     }
 
     #[test]
@@ -1001,7 +1001,7 @@ mod tests {
             emb.handle(req("GET", "/missing.css", Some("*"))).unwrap(),
         ] {
             assert_eq!(response.status, 404);
-            assert!(response.headers.get("etag").is_none());
+            assert!(!response.headers.contains_key("etag"));
         }
     }
 
@@ -1017,7 +1017,7 @@ mod tests {
                 emb.handle(req("GET", path, Some("*"))).unwrap(),
             ] {
                 assert_eq!(response.status, 200);
-                assert!(response.headers.get("etag").is_none());
+                assert!(!response.headers.contains_key("etag"));
             }
         }
     }
@@ -1039,7 +1039,7 @@ mod tests {
             .handle(req("GET", "/no/such/path", Some("*")))
             .unwrap();
         assert_eq!(response.status, 200);
-        assert!(response.headers.get("etag").is_none());
+        assert!(!response.headers.contains_key("etag"));
     }
 
     #[test]
@@ -1054,7 +1054,7 @@ mod tests {
                 emb.handle(req("GET", path, Some("*"))).unwrap(),
             ] {
                 assert_eq!(response.status, 403);
-                assert!(response.headers.get("etag").is_none());
+                assert!(!response.headers.contains_key("etag"));
             }
         }
     }
