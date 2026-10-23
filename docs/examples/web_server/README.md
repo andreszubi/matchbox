@@ -67,7 +67,7 @@ curl -i -H 'If-None-Match: "08c5d6d2...c1461"' http://localhost:8080/styles.css
 #   etag: "08c5d6d2...c1461"
 
 # templates are dynamic: no ETag, always 200
-curl -i -H 'If-None-Match: *' http://localhost:8080/
+curl -i -H 'If-None-Match: *' http://localhost:8080/about.bxm
 ```
 
 `If-None-Match` also accepts a comma-separated list of tags, weak tags (`W/"..."`), and `*`, which matches any existing file.
