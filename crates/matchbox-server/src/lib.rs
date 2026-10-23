@@ -914,11 +914,11 @@ mod tests {
         // 1st request: 200 + ETag
         let res = handler(
             State(state.clone()),
-            Method::GET,
-            Some(AxumPath("app.js".to_string())),
-            Query(HashMap::new()),
-            HeaderMap::new(),
-            None,
+            ConnectInfo("127.0.0.1:1234".parse().unwrap()),
+            Request::builder()
+                .uri("/app.js")
+                .body(Body::empty())
+                .unwrap(),
         )
         .await
         .into_response();
@@ -932,15 +932,14 @@ mod tests {
             .to_string();
 
         // 2nd request with If-None-Match (any casing; the adapter lowercases names)
-        let mut headers = HeaderMap::new();
-        headers.insert("If-None-Match", etag.parse().unwrap());
         let res = handler(
             State(state.clone()),
-            Method::GET,
-            Some(AxumPath("app.js".to_string())),
-            Query(HashMap::new()),
-            headers,
-            None,
+            ConnectInfo("127.0.0.1:1234".parse().unwrap()),
+            Request::builder()
+                .uri("/app.js")
+                .header("If-None-Match", etag.as_str())
+                .body(Body::empty())
+                .unwrap(),
         )
         .await
         .into_response();

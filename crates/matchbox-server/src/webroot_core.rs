@@ -812,6 +812,15 @@ mod tests {
 
     const CSS: &str = "body {color: red;}";
 
+    /// Value of the first response header named `name` (names are stored lowercase).
+    fn header<'a>(response: &'a WebrootResponse, name: &str) -> Option<&'a String> {
+        response
+            .headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value)
+    }
+
     fn req(method: &str, path: &str, if_none_match: Option<&str>) -> WebrootRequest {
         let mut headers = HashMap::new();
         if let Some(value) = if_none_match {
@@ -845,12 +854,9 @@ mod tests {
         WebrootEngine::new(EmbeddedAssetStore::new(map), WebrootConfig::default())
     }
 
-    fn etag_of<S: AssetStore>(engine: &WebrootEngine<S>, path: &str) -> String {
-        engine
-            .handle(req("GET", path, None))
-            .unwrap()
-            .headers
-            .get("etag")
+    fn etag_of<S: AssetStore + Send + Sync + 'static>(engine: &WebrootEngine<S>, path: &str) -> String {
+        let response = engine.handle(req("GET", path, None)).unwrap();
+        header(&response, "etag")
             .expect("static asset has an etag")
             .clone()
     }
@@ -858,8 +864,10 @@ mod tests {
     fn assert_not_modified(response: &WebrootResponse, tag: &str) {
         assert_eq!(response.status, 304);
         assert!(response.body.is_empty());
-        assert_eq!(response.headers.get("etag").map(String::as_str), Some(tag));
-        assert!(!response.headers.contains_key("content-type"));
+        assert_eq!(header(&response, "etag").map(String::as_str), Some(tag));
+        assert!(header(&response, "content-type").is_none());
+        // A 304 may only carry the full representation's length, so send none.
+        assert!(header(&response, "content-length").is_none());
     }
 
     #[test]
@@ -872,10 +880,10 @@ mod tests {
             emb.handle(req("GET", "/styles.css", None)).unwrap(),
         ] {
             assert_eq!(response.status, 200);
-            let tag = response.headers.get("etag").expect("static asset has an etag");
+            let tag = header(&response, "etag").expect("static asset has an etag");
             assert!(tag.starts_with('"') && tag.ends_with('"'));
             assert_eq!(
-                response.headers.get("content-type").map(String::as_str),
+                header(&response, "content-type").map(String::as_str),
                 Some("text/css")
             );
             assert_eq!(response.body, CSS.as_bytes());
@@ -904,7 +912,7 @@ mod tests {
 
         assert_eq!(response.status, 200);
         assert_eq!(response.body, b"body { color: blue; }");
-        assert_ne!(response.headers.get("etag"), Some(&old_tag));
+        assert_ne!(header(&response, "etag"), Some(&old_tag));
     }
 
     #[test]
@@ -947,9 +955,9 @@ mod tests {
             emb.handle(req("HEAD", "/styles.css", None)).unwrap(),
         ] {
             assert_eq!(response.status, 200);
-            assert!(response.headers.contains_key("etag"));
+            assert!(header(&response, "etag").is_some());
             assert_eq!(
-                response.headers.get("content-type").map(String::as_str),
+                header(&response, "content-type").map(String::as_str),
                 Some("text/css")
             );
             assert!(response.body.is_empty());
@@ -982,9 +990,9 @@ mod tests {
             emb.handle(req("GET", "/styles.css", Some("\"other\""))).unwrap(),
         ] {
             assert_eq!(response.status, 200);
-            assert!(response.headers.contains_key("etag"));
+            assert!(header(&response, "etag").is_some());
             assert_eq!(
-                response.headers.get("content-type").map(String::as_str),
+                header(&response, "content-type").map(String::as_str),
                 Some("text/css")
             );
             assert_eq!(response.body, CSS.as_bytes());
@@ -1001,7 +1009,7 @@ mod tests {
             emb.handle(req("GET", "/missing.css", Some("*"))).unwrap(),
         ] {
             assert_eq!(response.status, 404);
-            assert!(!response.headers.contains_key("etag"));
+            assert!(header(&response, "etag").is_none());
         }
     }
 
@@ -1017,7 +1025,7 @@ mod tests {
                 emb.handle(req("GET", path, Some("*"))).unwrap(),
             ] {
                 assert_eq!(response.status, 200);
-                assert!(!response.headers.contains_key("etag"));
+                assert!(header(&response, "etag").is_none());
             }
         }
     }
@@ -1039,7 +1047,7 @@ mod tests {
             .handle(req("GET", "/no/such/path", Some("*")))
             .unwrap();
         assert_eq!(response.status, 200);
-        assert!(!response.headers.contains_key("etag"));
+        assert!(header(&response, "etag").is_none());
     }
 
     #[test]
@@ -1054,7 +1062,7 @@ mod tests {
                 emb.handle(req("GET", path, Some("*"))).unwrap(),
             ] {
                 assert_eq!(response.status, 403);
-                assert!(!response.headers.contains_key("etag"));
+                assert!(header(&response, "etag").is_none());
             }
         }
     }
