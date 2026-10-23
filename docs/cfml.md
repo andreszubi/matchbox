@@ -13,7 +13,7 @@ The file extension picks the parser:
 | `.bxm` | BoxLang template |
 | `.bx`, `.bxs`, anything else | BoxLang script |
 
-This applies everywhere MatchBox reads a source file: the CLI (`matchbox page.cfm`), `include`, class imports (`import models.User;` finds `models/User.cfc` after `.bxs` and `.bx`), the webroot server (`.cfm` pages and `index.cfm`), and app server templates.
+This applies everywhere MatchBox reads a source file: the CLI (`matchbox page.cfm`), `include`, class imports (`import models.User;` finds `models/User.cfc` after `.bxs` and `.bx`), the webroot server (`.cfm` and `.cfml` pages, and `index.cfm`; `.cfc` and `.cfs` source files are never served, they return 501), and app server templates.
 
 ## Runnable Example
 
@@ -58,7 +58,7 @@ cargo run -p matchbox_server -- --port 8080 --webroot my-site
 | :--- | :--- |
 | `<cfset>`, `<cfoutput>`, `<cfif>` / `<cfelseif>` / `<cfelse>`, `<cfscript>`, `<!--- comments --->` | ✅ Works, same as the `<bx:…>` tags |
 | Tag names in any case (`<CFSET>`, `<CfOutput>`) | ✅ Works |
-| `<cfloop>`, `<cftry>` / `<cfcatch>`, `<cfswitch>`, `<cfinclude>` | ⚠️ Parse the same as `<bx:loop>`, `<bx:try>`, `<bx:switch>`, `<bx:include>`, so they also have the same bugs those BoxLang tags have today (see below) |
+| `<cfloop>`, `<cftry>` / `<cfcatch>`, `<cfswitch>`, `<cfinclude>` | ✅ Works, same as `<bx:loop>`, `<bx:try>`, `<bx:switch>`, `<bx:include>` (see the `cfcatch` limitation below) |
 | `component { … }` in `.cfc` / `.cfs` | ✅ Works, read as `class { … }` |
 | `NOT x`, `a MOD b` | ✅ Works, same as `!x` and `a % b` (in BoxLang code too) |
 | `GT`, `EQ`, `NEQ`, `GTE`, `LTE`, `IS`, `IS NOT`, `CONTAINS`, `AND`, `OR`, `EQV` | ✅ Works |
@@ -68,16 +68,19 @@ cargo run -p matchbox_server -- --port 8080 --webroot my-site
 | CF-only functions: `valueArray()`, `queryGetRow()`, `getTemplatePath()` | ✅ Renamed to `queryColumnData()`, `queryRowData()`, `getBaseTemplatePath()` (the query functions need the `bif-datasource` build feature) |
 | CF-only names: `cfcatch`, `cfthread`, `cffile`, `cfftp`, `cfhttp`, `cfquery`, `cfdocument`, `cfstoredproc`, `thistag` | ✅ Renamed to `bxcatch`, `bxthread`, …, `thiscomponent`. Struct keys, member names, named-argument names and user functions with these names are left alone |
 
-### Known Template Bugs
+### Known Limitation: `cfcatch` in Tags
 
-These come from MatchBox's existing `.bxm` template runtime, not from the CF parser. A `.cfm` page uses the same runtime, so it shows them too:
+Inside `<cfcatch>`, the error is not available as `cfcatch` yet: MatchBox's template `catch` names it `e`, the same as in `.bxm` templates. In CFScript, name the variable yourself and it works:
 
-- `<cfloop>` with `from`/`to` or `array` never stops.
-- A loop or `<cfif>` inside `<cfoutput>` prints the wrong result.
-- `<cfoutput>` inside a `<cfif>` block stops everything after it from printing.
-- `<cftry>` / `<cfcatch>` prints nothing.
-- `<cfswitch>` always runs `<cfdefaultcase>`.
-- `<cfinclude template="…">` reports "Include file not found" with an empty path. Use `include "file.cfm";` inside `<cfscript>` instead.
+```html
+<cfscript>
+    try {
+        throw( "boom" );
+    } catch ( any cfcatch ) {
+        writeOutput( "caught: " & cfcatch.message );
+    }
+</cfscript>
+```
 
 ## Not Supported
 

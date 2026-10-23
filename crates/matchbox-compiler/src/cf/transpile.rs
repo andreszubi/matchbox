@@ -106,8 +106,8 @@ impl Transpiler {
     fn stmt(&mut self, stmt: &mut Statement) {
         match &mut stmt.kind {
             StatementKind::Import { .. }
-            | StatementKind::Continue
-            | StatementKind::Break
+            | StatementKind::Continue(_)
+            | StatementKind::Break(_)
             | StatementKind::Rethrow => {}
             StatementKind::ClassDecl { members, .. } => {
                 for member in members {
@@ -165,6 +165,23 @@ impl Transpiler {
             | StatementKind::DoWhile { condition, body } => {
                 self.expr(condition);
                 self.stmts(body);
+            }
+            // The label names a loop, not a variable, so only the body is walked.
+            StatementKind::Labeled { body, .. } => self.stmts(body),
+            StatementKind::Component {
+                attributes, body, ..
+            } => {
+                for (key, value) in attributes {
+                    // An attribute name like `name=` is not a variable, same as
+                    // a bare-word struct key; computed names are still walked.
+                    if !matches!(key.kind, ExpressionKind::Identifier(_)) {
+                        self.expr(key);
+                    }
+                    self.expr(value);
+                }
+                if let Some(body) = body {
+                    self.stmts(body);
+                }
             }
             StatementKind::If {
                 condition,
@@ -332,7 +349,7 @@ impl Transpiler {
 
     fn body(&mut self, body: &mut FunctionBody) {
         match body {
-            FunctionBody::Block(stmts) => self.stmts(stmts),
+            FunctionBody::Block(stmts) | FunctionBody::Component(stmts) => self.stmts(stmts),
             FunctionBody::Expression(e) => self.expr(e),
             FunctionBody::Abstract => {}
         }
@@ -372,12 +389,29 @@ mod tests {
     use super::*;
     use crate::parser::parse;
 
+    /// An AST's debug text with every source position reduced to `Span`.
+    /// `valueArray` and `queryColumnData` build the same tree, but have
+    /// different lengths, so their byte spans differ.
+    fn shape<T: std::fmt::Debug>(ast: &T) -> String {
+        let text = format!("{ast:?}");
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text.as_str();
+        while let Some(start) = rest.find("Span {") {
+            out.push_str(&rest[..start]);
+            out.push_str("Span");
+            let end = rest[start..].find('}').expect("Span debug text is closed");
+            rest = &rest[start + end + 1..];
+        }
+        out.push_str(rest);
+        out
+    }
+
     /// Parse `cf`, run the rename pass, and check it equals `bx` parsed as-is.
     fn assert_renames_to(cf: &str, bx: &str) {
         let mut cf_ast = parse(cf, None).unwrap();
         transpile(&mut cf_ast);
         let bx_ast = parse(bx, None).unwrap();
-        assert_eq!(cf_ast, bx_ast, "CF source: {cf}");
+        assert_eq!(shape(&cf_ast), shape(&bx_ast), "CF source: {cf}");
     }
 
     #[test]
@@ -478,6 +512,6 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(cf, bx);
+        assert_eq!(shape(&cf), shape(&bx));
     }
 }

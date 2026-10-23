@@ -319,7 +319,7 @@ impl<S: AssetStore + Send + Sync + 'static> WebrootEngine<S> {
             .and_then(|value| value.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if matches!(extension.as_str(), "bx" | "cfm" | "cfc" | "cfs" | "cfml") {
+        if matches!(extension.as_str(), "bx" | "cfc" | "cfs") {
             return Ok(text_response(501, "Unsupported executable source type"));
         }
         let bytes = self.read_or_rewrite(&mut asset_path)?;
@@ -928,6 +928,7 @@ mod tests {
                 form: Default::default(),
                 headers: Default::default(),
                 body: Vec::new(),
+                ..Default::default()
             })
             .unwrap();
 
@@ -955,6 +956,7 @@ mod tests {
                 form: Default::default(),
                 headers: Default::default(),
                 body: Vec::new(),
+                ..Default::default()
             })
             .unwrap();
 
@@ -978,6 +980,7 @@ mod tests {
                 form: Default::default(),
                 headers: Default::default(),
                 body: Vec::new(),
+                ..Default::default()
             })
             .unwrap();
 

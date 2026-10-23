@@ -312,9 +312,12 @@ impl<'a> Parser<'a> {
     }
 
     // `mod` is only an operator between operands, so it stays usable as an identifier.
+    // Semicolons are optional, so `mod(` starting a new line is a call, while
+    // `10 mod (1 + 2)` on the same line is still the operator.
     fn is_mod_operator(&self) -> bool {
         self.token_text_lower(0).as_deref() == Some("mod")
-            && !matches!(self.kind(1), Some(TokenKind::Equal) | Some(TokenKind::Dot) | Some(TokenKind::LeftParen))
+            && !matches!(self.kind(1), Some(TokenKind::Equal) | Some(TokenKind::Dot))
+            && (self.kind(1) != Some(TokenKind::LeftParen) || self.on_same_line_as_previous_token())
     }
 
     fn token_text_lower(&self, offset: usize) -> Option<String> {
@@ -327,20 +330,6 @@ impl<'a> Parser<'a> {
         let current = self.peek_kind()?;
         let current_text = self.token_text_lower(0)?;
         match current {
-            // `a MOD b` is the word form of `a % b`. `mod` is not a reserved
-            // word, so it is only an operator here, between two operands, and
-            // it still works as an ordinary variable name elsewhere.
-            // Same precedence (11) as `%`, and the same "%" operator string.
-            // Semicolons are optional, so `mod` must be on the same line as the
-            // left operand, and not followed by `=`: otherwise `x = 10` then
-            // `mod(3)` or `mod = 9` on the next line would be misread.
-            TokenKind::Identifier
-                if current_text == "mod"
-                    && self.on_same_line_as_previous_token()
-                    && self.kind(1) != Some(TokenKind::Equal) =>
-            {
-                Some((11, "%".to_string(), 1))
-            }
             TokenKind::Not => {
                 if matches!(self.kind(1), Some(TokenKind::Contains)) {
                     Some((3, "not contains".to_string(), 2))
@@ -2069,11 +2058,17 @@ impl<'a> Parser<'a> {
                     Expression::new(ExpressionKind::Literal(Literal::Null), line),
                 ));
             } else {
-                let key = if self.tokens.get(self.pos + 1).is_some_and(|token| token.kind == TokenKind::Colon || (allow_equals && token.kind == TokenKind::Equal))
+                // `=` separates keys only where a value is expected, not in a
+                // `{` that starts a statement (see `statement_brace`).
+                let equals_key = allow_equals && self.kind(1) == Some(TokenKind::Equal);
+                let key = if (self.kind(1) == Some(TokenKind::Colon) || equals_key)
                     && self.peek_lexeme().is_some_and(|key| key.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$')) {
                     let key = self.peek_lexeme().unwrap().to_owned();
                     self.pos += 1;
                     Expression::new(ExpressionKind::Literal(Literal::String(vec![StringPart::Text(key)])), line)
+                } else if equals_key {
+                    // `{ "a" = 1 }`: a full expression would read `"a" = 1` as an assignment.
+                    self.parse_primary()?
                 } else { self.parse_expression()? };
                 if !matches!(self.peek_kind(), Some(TokenKind::Colon) | Some(TokenKind::Equal)) {
                     return Err(self
@@ -2561,6 +2556,23 @@ mod tests {
 
     // ---- CF parsing (issue #45): "same tree" tests ----
 
+    /// An AST's debug text with every source position reduced to `Span`. A CF
+    /// snippet and its BoxLang twin build the same tree, but their text has
+    /// different lengths, so their byte spans differ.
+    fn shape<T: std::fmt::Debug>(ast: &T) -> String {
+        let text = format!("{ast:?}");
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text.as_str();
+        while let Some(start) = rest.find("Span {") {
+            out.push_str(&rest[..start]);
+            out.push_str("Span");
+            let end = rest[start..].find('}').expect("Span debug text is closed");
+            rest = &rest[start + end + 1..];
+        }
+        out.push_str(rest);
+        out
+    }
+
     #[test]
     fn cf_component_parses_like_bx_class() {
         let cases = [
@@ -2577,7 +2589,7 @@ mod tests {
         for (cf, bx) in cases {
             let cf_ast = parse_cf_script(cf, None).unwrap();
             let bx_ast = parse(bx, None).unwrap();
-            assert_eq!(cf_ast, bx_ast, "CF source: {cf}");
+            assert_eq!(shape(&cf_ast), shape(&bx_ast), "CF source: {cf}");
         }
     }
 
@@ -2601,7 +2613,7 @@ mod tests {
         for (words, symbols) in cases {
             let a = parse(words, None).unwrap();
             let b = parse(symbols, None).unwrap();
-            assert_eq!(a, b, "source: {words}");
+            assert_eq!(shape(&a), shape(&b), "source: {words}");
         }
     }
 
@@ -2609,7 +2621,7 @@ mod tests {
     fn mod_is_still_a_variable_name() {
         let a = parse("mod = 5; y = mod MOD 2;", None).unwrap();
         let b = parse("mod = 5; y = mod % 2;", None).unwrap();
-        assert_eq!(a, b);
+        assert_eq!(shape(&a), shape(&b));
     }
 
     #[test]
@@ -2625,7 +2637,7 @@ mod tests {
         for (equals, colon) in cases {
             let a = parse(equals, None).unwrap();
             let b = parse(colon, None).unwrap();
-            assert_eq!(a, b, "source: {equals}");
+            assert_eq!(shape(&a), shape(&b), "source: {equals}");
         }
     }
 
@@ -2658,7 +2670,7 @@ mod tests {
                     ExpressionKind::Literal(Literal::Boolean(false))
                 );
                 // ...and everything else is the same as the plain function.
-                assert_eq!((name, params, body), (name2, params2, body2));
+                assert_eq!(shape(&(name, params, body)), shape(&(name2, params2, body2)));
             }
             other => panic!("Expected two FunctionDecls, got {:?}", other),
         }
@@ -2696,12 +2708,12 @@ mod tests {
         for (no_semicolons, semicolons) in cases {
             let a = parse(no_semicolons, None).unwrap();
             let b = parse(semicolons, None).unwrap();
-            assert_eq!(a, b, "source: {no_semicolons}");
+            assert_eq!(shape(&a), shape(&b), "source: {no_semicolons}");
         }
         // On the same line it is still the operator.
         assert_eq!(
-            parse("x = 10 MOD (1 + 2);", None).unwrap(),
-            parse("x = 10 % (1 + 2);", None).unwrap()
+            shape(&parse("x = 10 MOD (1 + 2);", None).unwrap()),
+            shape(&parse("x = 10 % (1 + 2);", None).unwrap())
         );
     }
 
